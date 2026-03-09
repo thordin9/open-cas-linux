@@ -43,11 +43,15 @@ def test_is_regular_file_oserror(mock_stat):
 # Tests for setup_loopback
 
 
+@mock.patch("os.stat")
+@mock.patch("opencas.is_file_loop_attached")
 @mock.patch("opencas.is_regular_file")
 @mock.patch("subprocess.run")
-def test_setup_loopback_success(mock_run, mock_is_file):
+def test_setup_loopback_success(mock_run, mock_is_file, mock_attached, mock_stat):
     mock_is_file.return_value = True
+    mock_attached.return_value = False
     mock_run.return_value = h.get_process_mock(0, "/dev/loop0\n", "")
+    mock_stat.return_value = mock.Mock(st_mode=stat.S_IFBLK)
 
     result = opencas.setup_loopback("/tmp/cache.img")
 
@@ -68,24 +72,65 @@ def test_setup_loopback_not_a_file(mock_is_file):
         opencas.setup_loopback("/dev/sda")
 
 
+@mock.patch("opencas.is_file_loop_attached")
 @mock.patch("opencas.is_regular_file")
 @mock.patch("subprocess.run")
-def test_setup_loopback_losetup_failure(mock_run, mock_is_file):
+def test_setup_loopback_losetup_failure(mock_run, mock_is_file, mock_attached):
     mock_is_file.return_value = True
+    mock_attached.return_value = False
     mock_run.return_value = h.get_process_mock(1, "", "losetup: failed")
 
     with pytest.raises(RuntimeError, match="Failed to set up loopback"):
         opencas.setup_loopback("/tmp/cache.img")
 
 
+@mock.patch("opencas.is_file_loop_attached")
 @mock.patch("opencas.is_regular_file")
 @mock.patch("subprocess.run")
-def test_setup_loopback_empty_output(mock_run, mock_is_file):
+def test_setup_loopback_empty_output(mock_run, mock_is_file, mock_attached):
     mock_is_file.return_value = True
+    mock_attached.return_value = False
     mock_run.return_value = h.get_process_mock(0, "", "")
 
     with pytest.raises(RuntimeError, match="losetup returned empty device"):
         opencas.setup_loopback("/tmp/cache.img")
+
+
+@mock.patch("opencas.is_file_loop_attached")
+@mock.patch("opencas.is_regular_file")
+def test_setup_loopback_already_attached(mock_is_file, mock_attached):
+    mock_is_file.return_value = True
+    mock_attached.return_value = True
+
+    with pytest.raises(RuntimeError, match="already attached to a loop device"):
+        opencas.setup_loopback("/tmp/cache.img")
+
+
+# Tests for is_file_loop_attached
+
+
+@mock.patch("subprocess.run")
+def test_is_file_loop_attached_true(mock_run):
+    mock_run.return_value = h.get_process_mock(
+        0, "/dev/loop0: []: (/tmp/cache.img)\n", ""
+    )
+
+    assert opencas.is_file_loop_attached("/tmp/cache.img") is True
+
+
+@mock.patch("subprocess.run")
+def test_is_file_loop_attached_false(mock_run):
+    mock_run.return_value = h.get_process_mock(0, "", "")
+
+    assert opencas.is_file_loop_attached("/tmp/cache.img") is False
+
+
+@mock.patch("subprocess.run")
+def test_is_file_loop_attached_error(mock_run):
+    mock_run.return_value = h.get_process_mock(1, "", "losetup: error")
+
+    with pytest.raises(RuntimeError, match="Failed to check loop status"):
+        opencas.is_file_loop_attached("/tmp/cache.img")
 
 
 # Tests for teardown_loopback

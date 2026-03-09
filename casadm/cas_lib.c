@@ -185,6 +185,54 @@ int is_regular_file(const char *path)
 	return S_ISREG(status.st_mode);
 }
 
+/**
+ * Check if the given file is already attached to a loop device.
+ * Returns 1 if already attached, 0 if not, FAILURE on error.
+ */
+static int is_file_loop_attached(const char *filepath)
+{
+	int pipefd[2];
+	pid_t pid;
+	ssize_t nread;
+	int status;
+	char buf[MAX_STR_LEN];
+
+	if (pipe(pipefd) == -1)
+		return FAILURE;
+
+	pid = fork();
+	if (pid == -1) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return FAILURE;
+	}
+
+	if (pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[1]);
+		execlp("losetup", "losetup", "-j", filepath,
+				(char *)NULL);
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+
+	nread = read(pipefd[0], buf, sizeof(buf) - 1);
+	close(pipefd[0]);
+
+	waitpid(pid, &status, 0);
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		return FAILURE;
+
+	if (nread < 0)
+		return FAILURE;
+
+	/* If losetup -j produced any output, the file is already attached */
+	return (nread > 0) ? 1 : 0;
+}
+
 int setup_loopback_device(const char *filepath, char *loop_dev,
 		size_t loop_dev_size)
 {
@@ -192,6 +240,23 @@ int setup_loopback_device(const char *filepath, char *loop_dev,
 	pid_t pid;
 	ssize_t nread;
 	int status;
+	int attached;
+	struct stat dev_stat;
+
+	/* Check if the file is already attached to a loop device */
+	attached = is_file_loop_attached(filepath);
+	if (attached < 0) {
+		cas_printf(LOG_ERR,
+				"Failed to check loop status for %s\n",
+				filepath);
+		return FAILURE;
+	}
+	if (attached) {
+		cas_printf(LOG_ERR,
+				"File %s is already attached to a loop device\n",
+				filepath);
+		return FAILURE;
+	}
 
 	if (pipe(pipefd) == -1) {
 		cas_printf(LOG_ERR, "Failed to create pipe for losetup\n");
@@ -248,6 +313,15 @@ int setup_loopback_device(const char *filepath, char *loop_dev,
 	/* Remove trailing newline */
 	if (nread > 0 && loop_dev[nread - 1] == '\n')
 		loop_dev[nread - 1] = '\0';
+
+	/* Verify the returned loop device is a valid block device */
+	if (stat(loop_dev, &dev_stat) == -1 || !S_ISBLK(dev_stat.st_mode)) {
+		cas_printf(LOG_ERR,
+				"Loopback device %s is not a valid block device\n",
+				loop_dev);
+		teardown_loopback_device(loop_dev);
+		return FAILURE;
+	}
 
 	return SUCCESS;
 }

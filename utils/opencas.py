@@ -22,10 +22,32 @@ def is_regular_file(path):
         return False
 
 
+def is_file_loop_attached(filepath):
+    """Check if a file is already attached to a loop device."""
+    abs_filepath = os.path.abspath(filepath)
+    result = subprocess.run(
+        ['losetup', '-j', abs_filepath],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f'Failed to check loop status for {abs_filepath}: {result.stderr.strip()}'
+        )
+    return bool(result.stdout.strip())
+
+
 def setup_loopback(filepath):
     abs_filepath = os.path.abspath(filepath)
     if not is_regular_file(abs_filepath):
         raise ValueError(f'{abs_filepath} is not a regular file')
+
+    # Check if the file is already attached to a loop device
+    if is_file_loop_attached(abs_filepath):
+        raise RuntimeError(
+            f'File {abs_filepath} is already attached to a loop device'
+        )
+
     result = subprocess.run(
         ['losetup', '--find', '--show', abs_filepath],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -38,6 +60,24 @@ def setup_loopback(filepath):
     loop_device = result.stdout.strip()
     if not loop_device:
         raise RuntimeError(f'losetup returned empty device for {abs_filepath}')
+
+    # Verify the returned device is a valid block device
+    try:
+        mode = os.stat(loop_device).st_mode
+        if not stat.S_ISBLK(mode):
+            teardown_loopback(loop_device)
+            raise RuntimeError(
+                f'Loopback device {loop_device} is not a valid block device'
+            )
+    except OSError as e:
+        try:
+            teardown_loopback(loop_device)
+        except RuntimeError:
+            pass
+        raise RuntimeError(
+            f'Cannot verify loopback device {loop_device}: {e}'
+        )
+
     return loop_device
 
 
