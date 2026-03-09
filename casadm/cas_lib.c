@@ -222,6 +222,13 @@ int setup_loopback_device(const char *filepath, char *loop_dev,
 
 	waitpid(pid, &status, 0);
 
+	if (nread < 0) {
+		cas_printf(LOG_ERR,
+				"Failed to read losetup output for %s\n",
+				filepath);
+		return FAILURE;
+	}
+
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
 		cas_printf(LOG_ERR,
 				"Failed to set up loopback device for %s\n",
@@ -229,7 +236,7 @@ int setup_loopback_device(const char *filepath, char *loop_dev,
 		return FAILURE;
 	}
 
-	if (nread <= 0) {
+	if (nread == 0) {
 		cas_printf(LOG_ERR,
 				"losetup returned no device for %s\n",
 				filepath);
