@@ -54,7 +54,7 @@ def test_cache_config_from_line_device_is_directory(mock_stat, mock_path_exists)
     )
     mock_stat.return_value = mock.Mock(st_mode=stat.S_IFDIR)
 
-    with pytest.raises(ValueError, match="is not block device"):
+    with pytest.raises(ValueError, match="is not a block device or regular file"):
         opencas.cas_config.cache_config.from_line(
             "1    /home/user/catpictures  WT"
         )
