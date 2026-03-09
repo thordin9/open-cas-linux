@@ -294,3 +294,69 @@ def test_start_standby_cache_with_file(mock_is_file, mock_setup_loop, mock_start
         load=False,
         force=False,
     )
+
+
+# Tests for error cleanup - loopback teardown on failure
+
+
+@mock.patch("opencas.teardown_loopback")
+@mock.patch("opencas.casadm.start_cache")
+@mock.patch("opencas.setup_loopback")
+@mock.patch("opencas.is_regular_file")
+def test_start_cache_with_file_cleans_up_on_error(
+    mock_is_file, mock_setup_loop, mock_start_cache, mock_teardown
+):
+    mock_is_file.return_value = True
+    mock_setup_loop.return_value = "/dev/loop0"
+    mock_start_cache.side_effect = Exception("casadm failed")
+
+    cache = opencas.cas_config.cache_config(
+        cache_id="1", device="/tmp/cache.img", cache_mode="WT"
+    )
+
+    with pytest.raises(Exception, match="casadm failed"):
+        opencas.start_cache(cache, load=False)
+
+    mock_teardown.assert_called_once_with("/dev/loop0")
+
+
+@mock.patch("opencas.teardown_loopback")
+@mock.patch("opencas.casadm.add_core")
+@mock.patch("opencas.setup_loopback")
+@mock.patch("opencas.is_regular_file")
+def test_add_core_with_file_cleans_up_on_error(
+    mock_is_file, mock_setup_loop, mock_add_core, mock_teardown
+):
+    mock_is_file.return_value = True
+    mock_setup_loop.return_value = "/dev/loop1"
+    mock_add_core.side_effect = Exception("casadm failed")
+
+    core = opencas.cas_config.core_config(
+        cache_id="1", core_id="1", path="/tmp/backing.img"
+    )
+
+    with pytest.raises(Exception, match="casadm failed"):
+        opencas.add_core(core, attach=False)
+
+    mock_teardown.assert_called_once_with("/dev/loop1")
+
+
+@mock.patch("opencas.teardown_loopback")
+@mock.patch("opencas.casadm.start_cache")
+@mock.patch("opencas.setup_loopback")
+@mock.patch("opencas.is_regular_file")
+def test_start_cache_no_cleanup_for_block_device_error(
+    mock_is_file, mock_setup_loop, mock_start_cache, mock_teardown
+):
+    mock_is_file.return_value = False
+    mock_start_cache.side_effect = Exception("casadm failed")
+
+    cache = opencas.cas_config.cache_config(
+        cache_id="1", device="/dev/sda", cache_mode="WT"
+    )
+
+    with pytest.raises(Exception, match="casadm failed"):
+        opencas.start_cache(cache, load=False)
+
+    mock_setup_loop.assert_not_called()
+    mock_teardown.assert_not_called()

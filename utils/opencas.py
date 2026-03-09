@@ -23,21 +23,21 @@ def is_regular_file(path):
 
 
 def setup_loopback(filepath):
-    filepath = os.path.abspath(filepath)
-    if not is_regular_file(filepath):
-        raise ValueError(f'{filepath} is not a regular file')
+    abs_filepath = os.path.abspath(filepath)
+    if not is_regular_file(abs_filepath):
+        raise ValueError(f'{abs_filepath} is not a regular file')
     result = subprocess.run(
-        ['losetup', '--find', '--show', filepath],
+        ['losetup', '--find', '--show', abs_filepath],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f'Failed to set up loopback device for {filepath}: {result.stderr.strip()}'
+            f'Failed to set up loopback device for {abs_filepath}: {result.stderr.strip()}'
         )
     loop_device = result.stdout.strip()
     if not loop_device:
-        raise RuntimeError(f'losetup returned empty device for {filepath}')
+        raise RuntimeError(f'losetup returned empty device for {abs_filepath}')
     return loop_device
 
 
@@ -612,27 +612,37 @@ class cas_config(object):
 
 def start_cache(cache, load, force=False):
     device = cache.device
+    loop_device = None
     if is_regular_file(device):
-        device = setup_loopback(device)
+        loop_device = setup_loopback(device)
+        device = loop_device
 
-    target_state = cache.params.get("target_failover_state")
-    if target_state is not None and target_state == "standby":
-        casadm.start_standby_cache(
-            device=device,
-            cache_id=cache.cache_id if not load else None,
-            cache_line_size=cache.params.get("cache_line_size") if not load else None,
-            load=load,
-            force=force
-        )
-    else:
-        casadm.start_cache(
-            device=device,
-            cache_id=cache.cache_id if not load else None,
-            cache_mode=cache.cache_mode if not load else None,
-            cache_line_size=cache.params.get('cache_line_size') if not load else None,
-            load=load,
-            force=force
-        )
+    try:
+        target_state = cache.params.get("target_failover_state")
+        if target_state is not None and target_state == "standby":
+            casadm.start_standby_cache(
+                device=device,
+                cache_id=cache.cache_id if not load else None,
+                cache_line_size=cache.params.get("cache_line_size") if not load else None,
+                load=load,
+                force=force
+            )
+        else:
+            casadm.start_cache(
+                device=device,
+                cache_id=cache.cache_id if not load else None,
+                cache_mode=cache.cache_mode if not load else None,
+                cache_line_size=cache.params.get('cache_line_size') if not load else None,
+                load=load,
+                force=force
+            )
+    except Exception:
+        if loop_device:
+            try:
+                teardown_loopback(loop_device)
+            except RuntimeError:
+                pass
+        raise
 
 
 def configure_cache(cache):
@@ -652,14 +662,24 @@ def configure_cache(cache):
 
 def add_core(core, attach):
     device = core.device
+    loop_device = None
     if is_regular_file(device):
-        device = setup_loopback(device)
+        loop_device = setup_loopback(device)
+        device = loop_device
 
-    casadm.add_core(
-            device=device,
-            cache_id=core.cache_id,
-            core_id=core.core_id,
-            try_add=attach)
+    try:
+        casadm.add_core(
+                device=device,
+                cache_id=core.cache_id,
+                core_id=core.core_id,
+                try_add=attach)
+    except Exception:
+        if loop_device:
+            try:
+                teardown_loopback(loop_device)
+            except RuntimeError:
+                pass
+        raise
 
 # Another helper functions
 
