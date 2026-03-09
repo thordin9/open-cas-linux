@@ -221,6 +221,9 @@ static int is_file_loop_attached(const char *filepath)
 	nread = read(pipefd[0], buf, sizeof(buf) - 1);
 	close(pipefd[0]);
 
+	if (nread >= 0)
+		buf[nread] = '\0';
+
 	waitpid(pid, &status, 0);
 
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
@@ -315,7 +318,14 @@ int setup_loopback_device(const char *filepath, char *loop_dev,
 		loop_dev[nread - 1] = '\0';
 
 	/* Verify the returned loop device is a valid block device */
-	if (stat(loop_dev, &dev_stat) == -1 || !S_ISBLK(dev_stat.st_mode)) {
+	if (stat(loop_dev, &dev_stat) == -1) {
+		cas_printf(LOG_ERR,
+				"Failed to stat loopback device %s\n",
+				loop_dev);
+		teardown_loopback_device(loop_dev);
+		return FAILURE;
+	}
+	if (!S_ISBLK(dev_stat.st_mode)) {
 		cas_printf(LOG_ERR,
 				"Loopback device %s is not a valid block device\n",
 				loop_dev);
