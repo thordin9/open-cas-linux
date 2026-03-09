@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <pthread.h>
 #include <dirent.h>
@@ -166,8 +167,198 @@ int validate_dev(const char *dev_path)
 		return FAILURE;
 	}
 
-	if (!S_ISBLK(status.st_mode)) {
-		printf("Path does not describe a block device\n");
+	if (!S_ISBLK(status.st_mode) && !S_ISREG(status.st_mode)) {
+		printf("Path does not describe a block device or regular file\n");
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+
+int is_regular_file(const char *path)
+{
+	struct stat status;
+
+	if (stat(path, &status) == -1)
+		return 0;
+
+	return S_ISREG(status.st_mode);
+}
+
+/**
+ * Check if the given file is already attached to a loop device.
+ * Returns 1 if already attached, 0 if not, FAILURE on error.
+ */
+static int is_file_loop_attached(const char *filepath)
+{
+	int pipefd[2];
+	pid_t pid;
+	ssize_t nread;
+	int status;
+	char buf[MAX_STR_LEN];
+
+	if (pipe(pipefd) == -1)
+		return FAILURE;
+
+	pid = fork();
+	if (pid == -1) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return FAILURE;
+	}
+
+	if (pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[1]);
+		execlp("losetup", "losetup", "-j", filepath,
+				(char *)NULL);
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+
+	nread = read(pipefd[0], buf, sizeof(buf) - 1);
+	close(pipefd[0]);
+
+	if (nread >= 0)
+		buf[nread] = '\0';
+
+	waitpid(pid, &status, 0);
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		return FAILURE;
+
+	if (nread < 0)
+		return FAILURE;
+
+	/* If losetup -j produced any output, the file is already attached */
+	return (nread > 0) ? 1 : 0;
+}
+
+int setup_loopback_device(const char *filepath, char *loop_dev,
+		size_t loop_dev_size)
+{
+	int pipefd[2];
+	pid_t pid;
+	ssize_t nread;
+	int status;
+	int attached;
+	struct stat dev_stat;
+
+	/* Check if the file is already attached to a loop device */
+	attached = is_file_loop_attached(filepath);
+	if (attached < 0) {
+		cas_printf(LOG_ERR,
+				"Failed to check loop status for %s\n",
+				filepath);
+		return FAILURE;
+	}
+	if (attached) {
+		cas_printf(LOG_ERR,
+				"File %s is already attached to a loop device\n",
+				filepath);
+		return FAILURE;
+	}
+
+	if (pipe(pipefd) == -1) {
+		cas_printf(LOG_ERR, "Failed to create pipe for losetup\n");
+		return FAILURE;
+	}
+
+	pid = fork();
+	if (pid == -1) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		cas_printf(LOG_ERR, "Failed to fork for losetup\n");
+		return FAILURE;
+	}
+
+	if (pid == 0) {
+		close(pipefd[0]);
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[1]);
+		execlp("losetup", "losetup", "--find", "--show",
+				filepath, (char *)NULL);
+		_exit(127);
+	}
+
+	close(pipefd[1]);
+
+	nread = read(pipefd[0], loop_dev, loop_dev_size - 1);
+	close(pipefd[0]);
+
+	waitpid(pid, &status, 0);
+
+	if (nread < 0) {
+		cas_printf(LOG_ERR,
+				"Failed to read losetup output for %s\n",
+				filepath);
+		return FAILURE;
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		cas_printf(LOG_ERR,
+				"Failed to set up loopback device for %s\n",
+				filepath);
+		return FAILURE;
+	}
+
+	if (nread == 0) {
+		cas_printf(LOG_ERR,
+				"losetup returned no device for %s\n",
+				filepath);
+		return FAILURE;
+	}
+
+	loop_dev[nread] = '\0';
+
+	/* Remove trailing newline */
+	if (nread > 0 && loop_dev[nread - 1] == '\n')
+		loop_dev[nread - 1] = '\0';
+
+	/* Verify the returned loop device is a valid block device */
+	if (stat(loop_dev, &dev_stat) == -1) {
+		cas_printf(LOG_ERR,
+				"Failed to stat loopback device %s\n",
+				loop_dev);
+		teardown_loopback_device(loop_dev);
+		return FAILURE;
+	}
+	if (!S_ISBLK(dev_stat.st_mode)) {
+		cas_printf(LOG_ERR,
+				"Loopback device %s is not a valid block device\n",
+				loop_dev);
+		teardown_loopback_device(loop_dev);
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+
+int teardown_loopback_device(const char *loop_dev)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid == -1) {
+		cas_printf(LOG_ERR, "Failed to fork for losetup -d\n");
+		return FAILURE;
+	}
+
+	if (pid == 0) {
+		execlp("losetup", "losetup", "-d", loop_dev,
+				(char *)NULL);
+		_exit(127);
+	}
+
+	waitpid(pid, &status, 0);
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		cas_printf(LOG_ERR,
+				"Failed to detach loopback device %s\n",
+				loop_dev);
 		return FAILURE;
 	}
 
@@ -572,6 +763,8 @@ static bool is_dev_link_whitelisted(const char* path)
 			"/dev/nullb[0-9]\\+$",
 			"/dev/drbd[0-9]\\+$",
 			"/dev/drbd[0-9]\\+p[0-9]\\+$",
+			"/dev/loop[0-9]\\+$",
+			"/dev/loop[0-9]\\+p[0-9]\\+$",
 		};
 	static const unsigned count = ARRAY_SIZE(whitelist);
 	size_t i;

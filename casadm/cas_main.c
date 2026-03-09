@@ -33,6 +33,10 @@
 #define WRONG_DEVICE_ERROR "Specified caching device '%s' is not supported.\n"
 #define NOT_BLOCK_ERROR    "Please use block device file.\n"
 
+/* Static buffers for loopback device paths */
+static char cache_loop_dev[MAX_STR_LEN];
+static char core_loop_dev[MAX_STR_LEN];
+
 extern cas_printf_t cas_printf;
 
 #define PARAM_TYPE_CORE		1
@@ -394,14 +398,15 @@ int validate_cache_path(const char* path, bool force)
 		return FAILURE;
 	}
 
-	if (!S_ISBLK(device_info.st_mode)) {
+	if (!S_ISBLK(device_info.st_mode) && !S_ISREG(device_info.st_mode)) {
 		close(cache_device);
 		cas_printf(LOG_ERR, WRONG_DEVICE_ERROR NOT_BLOCK_ERROR,
 				path);
 		return FAILURE;
 	}
 
-	if (check_fs(path, force)) {
+	/* Only check for filesystem on block devices */
+	if (S_ISBLK(device_info.st_mode) && check_fs(path, force)) {
 		close(cache_device);
 		return FAILURE;
 	}
@@ -416,11 +421,29 @@ int validate_cache_path(const char* path, bool force)
 
 int handle_cache_attach(void)
 {
-	return attach_cache(
+	const char *device = command_args_values.cache_device;
+	int using_loop = 0;
+	int status;
+
+	if (is_regular_file(device)) {
+		if (setup_loopback_device(device, cache_loop_dev,
+					sizeof(cache_loop_dev))) {
+			return FAILURE;
+		}
+		device = cache_loop_dev;
+		using_loop = 1;
+	}
+
+	status = attach_cache(
 			command_args_values.cache_id,
-			command_args_values.cache_device,
+			device,
 			command_args_values.force
 			);
+
+	if (status != SUCCESS && using_loop)
+		teardown_loopback_device(cache_loop_dev);
+
+	return status;
 }
 
 int handle_cache_detach(void)
@@ -431,6 +454,8 @@ int handle_cache_detach(void)
 int handle_start()
 {
 	int status;
+	const char *device = command_args_values.cache_device;
+	int using_loop = 0;
 
 	if (command_args_values.state == CACHE_INIT_LOAD) {
 		if (command_args_values.force ||
@@ -452,17 +477,31 @@ int handle_start()
 		}
 	}
 
-	if (validate_cache_path(command_args_values.cache_device,
+	if (is_regular_file(device)) {
+		if (setup_loopback_device(device, cache_loop_dev,
+					sizeof(cache_loop_dev))) {
+			return FAILURE;
+		}
+		device = cache_loop_dev;
+		using_loop = 1;
+	}
+
+	if (validate_cache_path(device,
 				command_args_values.force) == FAILURE) {
+		if (using_loop)
+			teardown_loopback_device(cache_loop_dev);
 		return FAILURE;
 	}
 
 	status = start_cache(command_args_values.cache_id,
 			command_args_values.state,
-			command_args_values.cache_device,
+			device,
 			command_args_values.cache_mode,
 			command_args_values.line_size,
 			command_args_values.force);
+
+	if (status != SUCCESS && using_loop)
+		teardown_loopback_device(cache_loop_dev);
 
 	return status;
 }
@@ -1273,10 +1312,28 @@ static cli_option add_options[] = {
 
 int handle_add()
 {
-	return add_core(command_args_values.cache_id,
+	const char *device = command_args_values.core_device;
+	int using_loop = 0;
+	int status;
+
+	if (is_regular_file(device)) {
+		if (setup_loopback_device(device, core_loop_dev,
+					sizeof(core_loop_dev))) {
+			return FAILURE;
+		}
+		device = core_loop_dev;
+		using_loop = 1;
+	}
+
+	status = add_core(command_args_values.cache_id,
 			command_args_values.core_id,
-			command_args_values.core_device,
+			device,
 			false, false);
+
+	if (status != SUCCESS && using_loop)
+		teardown_loopback_device(core_loop_dev);
+
+	return status;
 }
 
 static cli_option remove_options[] = {
@@ -1841,14 +1898,33 @@ int script_handle() {
 	switch (command_args_values.script_subcmd) {
 	case script_cmd_check_cache_device:
 		return check_cache_device(command_args_values.cache_device);
-	case script_cmd_add_core:
-		return add_core(
+	case script_cmd_add_core: {
+		const char *device = command_args_values.core_device;
+		int using_loop = 0;
+		int status;
+
+		if (is_regular_file(device)) {
+			if (setup_loopback_device(device, core_loop_dev,
+						sizeof(core_loop_dev))) {
+				return FAILURE;
+			}
+			device = core_loop_dev;
+			using_loop = 1;
+		}
+
+		status = add_core(
 			command_args_values.cache_id,
 			command_args_values.core_id,
-			command_args_values.core_device,
+			device,
 			command_args_values.try_add,
 			command_args_values.update_path
 			);
+
+		if (status != SUCCESS && using_loop)
+			teardown_loopback_device(core_loop_dev);
+
+		return status;
+	}
 	case script_cmd_remove_core:
 		return remove_core(
 			command_args_values.cache_id,
@@ -2152,6 +2228,10 @@ int standby_is_missing() {
 
 /* Command handler */
 int standby_handle() {
+	const char *device;
+	int using_loop = 0;
+	int status;
+
 	/* Check if sub-command was specified */
 	if (standby_opt_subcmd_unknown == standby_params.subcmd) {
 		cmd_subcmd_print_invalid_subcmd(standby_params_options);
@@ -2173,31 +2253,54 @@ int standby_handle() {
 		return FAILURE;
 	}
 
+	device = standby_params.cache_device;
+
 	if (standby_params.subcmd != standby_opt_subcmd_detach) {
-		if (validate_cache_path(standby_params.cache_device,
+		if (device && is_regular_file(device)) {
+			if (setup_loopback_device(device, cache_loop_dev,
+						sizeof(cache_loop_dev))) {
+				return FAILURE;
+			}
+			device = cache_loop_dev;
+			using_loop = 1;
+		}
+
+		if (validate_cache_path(device,
 					standby_params.force) == FAILURE) {
+			if (using_loop)
+				teardown_loopback_device(cache_loop_dev);
 			return FAILURE;
 		}
 	}
 
 	switch (standby_params.subcmd) {
 	case standby_opt_subcmd_init:
-		return standby_init(standby_params.cache_id,
+		status = standby_init(standby_params.cache_id,
 				standby_params.line_size,
-				standby_params.cache_device,
+				device,
 				standby_params.force);
+		break;
 	case standby_opt_subcmd_load:
-		return standby_load(standby_params.cache_id,
+		status = standby_load(standby_params.cache_id,
 				standby_params.line_size,
-				standby_params.cache_device);
+				device);
+		break;
 	case standby_opt_subcmd_detach:
-		return standby_detach(standby_params.cache_id);
+		status = standby_detach(standby_params.cache_id);
+		break;
 	case standby_opt_subcmd_activate:
-		return standby_activate(standby_params.cache_id,
-				standby_params.cache_device);
+		status = standby_activate(standby_params.cache_id,
+				device);
+		break;
+	default:
+		status = FAILURE;
+		break;
 	}
 
-	return FAILURE;
+	if (status != SUCCESS && using_loop)
+		teardown_loopback_device(cache_loop_dev);
+
+	return status;
 }
 
 void standby_help(app *app_values, cli_command *cmd)
@@ -2241,21 +2344,42 @@ int zero_handle_option(char *opt, const char **arg)
 
 int handle_zero()
 {
+	const char *device = zero_params.device;
+	int using_loop = 0;
 	int cache_device = 0;
+	int status;
 
-	cache_device = open(zero_params.device, O_RDONLY);
+	if (is_regular_file(device)) {
+		if (setup_loopback_device(device, cache_loop_dev,
+					sizeof(cache_loop_dev))) {
+			return FAILURE;
+		}
+		device = cache_loop_dev;
+		using_loop = 1;
+	}
+
+	cache_device = open(device, O_RDONLY);
 
 	if (cache_device < 0) {
-		cas_printf(LOG_ERR, "Couldn't open cache device %s.\n", zero_params.device);
+		cas_printf(LOG_ERR, "Couldn't open cache device %s.\n", device);
+		if (using_loop)
+			teardown_loopback_device(cache_loop_dev);
 		return FAILURE;
 	}
 
 	if (close(cache_device) < 0) {
 		cas_printf(LOG_ERR, "Couldn't close the cache device.\n");
+		if (using_loop)
+			teardown_loopback_device(cache_loop_dev);
 		return FAILURE;
 	}
 
-	return zero_md(zero_params.device, zero_params.force);
+	status = zero_md(device, zero_params.force);
+
+	if (using_loop)
+		teardown_loopback_device(cache_loop_dev);
+
+	return status;
 }
 
 /*******************************************************************************

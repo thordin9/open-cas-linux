@@ -296,6 +296,10 @@ struct cache_device **get_cache_devices(int *caches_count, bool by_id_path);
 void free_cache_devices_list(struct cache_device **caches, int caches_count);
 
 int validate_dev(const char *dev_path);
+int is_regular_file(const char *path);
+int setup_loopback_device(const char *filepath, char *loop_dev,
+		size_t loop_dev_size);
+int teardown_loopback_device(const char *loop_dev);
 int validate_str_num(const char *source_str, const char *msg, long long int min, long long int max);
 int validate_str_num_sbd(const char *source_str, const char *msg, int min, int max);
 int validate_str_unum(const char *source_str, const char *msg, unsigned int min,
